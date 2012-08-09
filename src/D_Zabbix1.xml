@@ -1,0 +1,26 @@
+<?xml version="1.0"?>
+<root xmlns="urn:schemas-upnp-org:device-1-0">
+	<specVersion>
+		<major>1</major>
+		<minor>0</minor>
+	</specVersion>
+	<device>
+		<deviceType>urn:schemas-hugheaves-com:device:Zabbix:1</deviceType>
+		<friendlyName>Zabbix Plugin</friendlyName>
+		<manufacturer>Zabbix</manufacturer>
+		<manufacturerURL>http://www.zabbix.com</manufacturerURL>
+		<staticJson>D_Zabbix1.json</staticJson>
+		<serviceList>
+			<service>
+				<serviceType>urn:schemas-hugheaves-com:service:Zabbix:1</serviceType>
+				<serviceId>urn:hugheaves-com:serviceId:Zabbix1</serviceId>
+				<SCPDURL>S_Zabbix1.xml</SCPDURL>
+			</service>
+		</serviceList>
+ 	
+		<implementationList>
+			<implementationFile>I_Zabbix1.xml</implementationFile>
+		</implementationList>
+
+	</device>
+</root>
