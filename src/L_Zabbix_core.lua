@@ -30,9 +30,11 @@ local SEND_INTERVAL = 30
 
 -- GLOBALS
 local g_deviceId = nil
-local g_events = { [0] = {} }
-local g_eventsIndex = 0
+--local g_events = { [0] = {} }
+--local g_eventsIndex = 0
 local g_statusUrl = "http://localhost:3480/data_request?id=lu_status2&output_format=json"
+local g_sender = nil
+local g_hostName = nil
 
 -----------------------------------------
 --------- Utility Functions -------------
@@ -47,6 +49,19 @@ end
 ---------- Zabbix Communication ----------
 ------------------------------------------
 
+local function startSender()
+	local senderPath = util.getLuupVariable(SID.ZABBIX, "SenderPath", g_deviceId, util.T_STRING)
+	local agentConfigFile = util.getLuupVariable(SID.ZABBIX, "AgentConfigFile", g_deviceId, util.T_STRING)
+
+	local commandLine = senderPath .. " -c " .. agentConfigFile .. " -r -i - 1>/tmp/zabbix_sender_stdout.log 2>/tmp/zabbix_sender_stderr.log"
+	log.debug ("commandLine = ", commandLine)
+	
+	local sender = io.popen(commandLine, "w")
+	sender:flush ()
+	
+	return sender
+end
+
 --- Callback that receives notification of any changes in UPnP variables
 -- Collects the changes for periodic transmission by the sendEvents() function
 function variableWatchCallback(lul_device, lul_service, lul_variable, lul_value_old, lul_value_new)
@@ -56,71 +71,47 @@ function variableWatchCallback(lul_device, lul_service, lul_variable, lul_value_
 	", lul_value_old = ", lul_value_old,
 	", lul_value_new = ", lul_value_new)
 
-	local eventData = {}
-	eventData.deviceId = tonumber(lul_device)
-	eventData.service = lul_service
-	eventData.variable = lul_variable
-	eventData.value = lul_value_new
-	eventData.timestamp = os.time()
+	local outputData = {
+		g_hostName,
+		" ",
+		buildKey (lul_device, lul_service, lul_variable),
+		" ",
+		lul_value_new,
+		"\n"
+	}
 
-	table.insert(g_events[g_eventsIndex], eventData)
+	local outputLine = table.concat(outputData)
 
-	log.debug ("g_eventsIndex = ", g_eventsIndex, ", #g_events= ", #g_events, ", eventData = ", eventData)
-end
+	log.debug ("Sending to Zabbix, outputLine = |", outputLine, "|")
 
---- Send the current set of events to Zabbix
-function sendEvents (data)
-	local currentEventsIndex = g_eventsIndex
-	g_events[g_eventsIndex + 1] = {}
-	g_eventsIndex = g_eventsIndex + 1
-
-	if (#g_events[currentEventsIndex] > 0) then
-
-		log.debug ("Writing events to zabbix_sender process")
-
-		local hostName = util.getLuupVariable(SID.ZABBIX, "HostName", g_deviceId, util.T_STRING)
-		local senderPath = util.getLuupVariable(SID.ZABBIX, "SenderPath", g_deviceId, util.T_STRING)
-		local agentConfigFile = util.getLuupVariable(SID.ZABBIX, "AgentConfigFile", g_deviceId, util.T_STRING)
-
-		local commandLine = senderPath .. " -vv -T -s " .. hostName .. " -c " .. agentConfigFile .. " -i - >> /tmp/crud"
-		log.debug ("commandLine = ", commandLine)
-		local output = io.popen(commandLine, "w")
-
-		for index, eventData in pairs(g_events[currentEventsIndex]) do
-			local outputLine  = hostName .. " " .. buildKey (eventData.deviceId, eventData.service, eventData.variable) .. " ".. eventData.timestamp.. " ".. eventData.value.. "\n"
-			log.debug ("outputLine: [", outputLine, "]")
-			output:write (outputLine)
-		end
-
-		output:close()
-	else
-		log.info ("No events to send to Zabbix")
+	if (g_sender == nil) then
+		g_sender = startSender()
 	end
+	
+	g_sender:write (outputLine)
+	g_sender:flush ()
 
-	g_events[currentEventsIndex] = nil
+	log.debug ("Done sending to Zabbix")
 
-	luup.call_delay("sendEvents", util.getLuupVariable(SID.ZABBIX, "SendInterval", g_deviceId, util.T_NUMBER), "true", true)
 end
 
 ------------------------------------------------
 ---------- Zabbix Template Generation ----------
 ------------------------------------------------
+--
+local function generateApplicationXml(deviceId)
+	return ("<application><name>MiOS - " .. luup.devices[tonumber(deviceId)].description .. "</name></application>")
+end
 
---- write an item to the template
-local function generateItem(deviceId, state)
+local function generateItemXml(deviceId, state)
 	log.trace ("Generating Zabbix template item: deviceId = ", deviceId, ", state = ", state)
 
-	local item =
-[[
-<item><name>__NAME__</name><type>2</type><snmp_community/><multiplier>0</multiplier><snmp_oid/><key>__KEY__</key><delay>0</delay><history>90</history>
-<trends>365</trends><status>0</status><value_type>__TYPE__</value_type><allowed_hosts/><units/><delta>0</delta>
-<snmpv3_securityname/><snmpv3_securitylevel>0</snmpv3_securitylevel><snmpv3_authpassphrase/><snmpv3_privpassphrase/>
-<formula>1</formula><delay_flex/><params/><ipmi_sensor/><data_type>0</data_type><authtype>0</authtype><username/>
-<password/><publickey/><privatekey/><port/><description/><inventory_link>0</inventory_link><applications/><valuemap/></item>
-]]
-	item = item:gsub("__NAME__", buildKey(deviceId, state.service, state.variable))
-	item = item:gsub("__KEY__", buildKey(deviceId, state.service, state.variable))
-
+	local itemXml = {}
+	
+	table.insert(itemXml, "<item>\n")
+	table.insert (itemXml, "<name>" .. state.service .. " - " .. state.variable .. "</name>\n")
+	table.insert (itemXml, "<key>" .. buildKey(deviceId, state.service, state.variable) .. "</key>\n")
+	
 	-- guess the Zabbix type of the variable based on its current value (Yuck - talk about a horrible hack!!!)
 	-- Zabbix types:
 	--  0 - float
@@ -128,14 +119,30 @@ local function generateItem(deviceId, state)
 	--  2 - log
 	--  3 - unsigned
 	--  4 - text
-
+	
 	if (tonumber(state.value) == nil) then
-		item = item:gsub("__TYPE__", "4")
+		table.insert(itemXml, "<value_type>4</value_type>\n")
 	else
-		item = item:gsub("__TYPE__", "0")
+		table.insert(itemXml, "<value_type>0</value_type>\n")
 	end
 
-	return item
+	table.insert(itemXml, "<applications>\n" .. generateApplicationXml(deviceId) .. "</applications>\n")
+
+	table.insert (itemXml, 
+[[
+	<type>2</type><snmp_community/><multiplier>0</multiplier><snmp_oid/>
+	<delay>0</delay><history>90</history>
+	<trends>365</trends><status>0</status>
+	<allowed_hosts/><units/><delta>0</delta>
+	<snmpv3_securityname/><snmpv3_securitylevel>0</snmpv3_securitylevel><snmpv3_authpassphrase/><snmpv3_privpassphrase/>
+	<formula>1</formula><delay_flex/><params/><ipmi_sensor/><data_type>0</data_type><authtype>0</authtype><username/>
+	<password/><publickey/><privatekey/><port/><description/><inventory_link>0</inventory_link>
+	<valuemap/>
+	</item>
+]]
+	)
+
+	return table.concat(itemXml)
 end
 
 --- Generate a Zabbix XML template that can be imported directly into Zabbix
@@ -144,10 +151,10 @@ function generateZabbixTemplate (lul_request, lul_parameters, lul_outputformat)
 
 	local statusData = util.httpGetJSON(g_statusUrl)
 
-	local templateData = {}
+	local templateXml = {}
 
-	local header =
-	[[
+	local xmlChunk =
+[[
 <?xml version="1.0" encoding="UTF-8"?>
 <zabbix_export>
     <version>2.0</version>
@@ -166,25 +173,36 @@ function generateZabbixTemplate (lul_request, lul_parameters, lul_outputformat)
                     <name>Templates</name>
                 </group>
             </groups>
-            <applications/>
+   			 <applications>
+]]
+
+	xmlChunk = xmlChunk:gsub("__DATE__", os.date("%Y-%m-%dT%H:%M:%S", os.time()))
+	xmlChunk = xmlChunk:gsub("__HOSTNAME__", util.getLuupVariable(SID.ZABBIX, "HostName", g_deviceId, util.T_STRING))
+
+	table.insert(templateXml, xmlChunk)
+
+	for i, deviceData in pairs (statusData.devices) do
+		table.insert (templateXml, generateApplicationXml(deviceData.id))
+	end
+	
+	xmlChunk = 
+[[
+			</applications>
             <items>
 ]]
 
-	header = header:gsub("__DATE__", os.date("%y-%m-%dT%H:%M:%S", os.time()))
-	header = header:gsub("__HOSTNAME__", util.getLuupVariable(SID.ZABBIX, "HostName", g_deviceId, util.T_STRING))
-
-	table.insert(templateData, header)
+	table.insert(templateXml, xmlChunk)
 
 	-- for each Vera device ...
 	for i, deviceData in pairs (statusData.devices) do
 		-- write each variable to the export file
 		for j, state in pairs(deviceData.states) do
-			table.insert(templateData, generateItem(tonumber(deviceData.id), state))
+			table.insert(templateXml, generateItemXml(deviceData.id, state))
 		end
 	end
 
-	local footer =
-	[[
+	local xmlChunk =
+[[
             </items>
             <discovery_rules/>
             <macros/>
@@ -195,11 +213,11 @@ function generateZabbixTemplate (lul_request, lul_parameters, lul_outputformat)
 </zabbix_export>
 ]]
 
-	table.insert(templateData, footer)
+	table.insert(templateXml, xmlChunk)
 
 	log.info ("Done generating template file")
-	
-	return table.concat(templateData)
+
+	return table.concat(templateXml)
 end
 
 
@@ -211,7 +229,7 @@ end
 -- Register variable_watch listeners for every service of every device
 local function registerListeners (statusData)
 	log.info ("Registering listeners")
-	
+
 	local statusData = util.httpGetJSON(g_statusUrl)
 
 	-- for each Vera device ...
@@ -235,7 +253,6 @@ local function initLuupVariables()
 	util.initVariableIfNotSet(SID.ZABBIX, "HostName", "veralite", g_deviceId)
 	util.initVariableIfNotSet(SID.ZABBIX, "SenderPath", "/usr/bin/zabbix_sender", g_deviceId)
 	util.initVariableIfNotSet(SID.ZABBIX, "AgentConfigFile", "/etc/zabbix_agentd.conf", g_deviceId)
-	util.initVariableIfNotSet(SID.ZABBIX, "TemplateFile", "/tmp/zabbix_template.xml", g_deviceId)
 	util.initVariableIfNotSet(SID.ZABBIX, "SendInterval", 30, g_deviceId)
 end
 
@@ -255,12 +272,12 @@ function initialize(lul_device)
 
 	initLuupVariables()
 
-	luup.call_delay("sendEvents", util.getLuupVariable(SID.ZABBIX, "SendInterval", g_deviceId, util.T_NUMBER), "true", true)
-
+	g_hostName = util.getLuupVariable(SID.ZABBIX, "HostName", g_deviceId, util.T_STRING)
+	
 	registerListeners(statusData)
 
 	luup.register_handler("generateZabbixTemplate","generateZabbixTemplate")
-	
+
 	log.info("Done with initialization")
 
 	return success, errorMsg, "Zabbix"
