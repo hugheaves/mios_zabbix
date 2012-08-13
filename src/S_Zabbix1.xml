@@ -9,6 +9,11 @@
 			<sendEventsAttribute>yes</sendEventsAttribute>
 			<dataType>i1</dataType>
 		</stateVariable>
+		<stateVariable>
+			<name>LogConfig</name>
+			<sendEventsAttribute>yes</sendEventsAttribute>
+			<dataType>string</dataType>
+		</stateVariable>
 	</serviceStateTable>
 	<actionList>
 		<action>

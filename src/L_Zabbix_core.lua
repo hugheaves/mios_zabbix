@@ -15,26 +15,37 @@ local util = g_util
 local PLUGIN_VERSION = "0.1"
 local LOG_PREFIX = "Zabbix"
 
+local CONFIG_FILE = "/tmp/mios_zabbix_agentd.conf"
+local SENDER_PATH = "/etc/cmh-ludl/mios_zabbix_sender"
+local AGENT_PATH = "/etc/cmh-ludl/mios_zabbix_agentd"
+
+
 local SID = {
 	ZABBIX = "urn:hugheaves-com:serviceId:Zabbix1"
 }
 
-local LOG_FILTER = {
-	["L_Zabbix_core.lua$"] = {
-	},
-	["L_Zabbix_util.lua$"] = {
+local DEFAULT_LOG_CONFIG = {
+		["version"] = 1,
+		["files"] = {
+			["./*L_Zabbix_log.lua$"] = {
+				["level"] = log.LOG_LEVEL_INFO,
+				["functions"] = {
+				}
+			},
+			["./*L_Zabbix_util.lua$"] = {
+				["level"] = log.LOG_LEVEL_INFO,
+				["functions"] = {
+				}
+			},
+		}
 	}
-}
-
-local SEND_INTERVAL = 30
-
+	
 -- GLOBALS
 local g_deviceId = nil
---local g_events = { [0] = {} }
---local g_eventsIndex = 0
 local g_statusUrl = "http://localhost:3480/data_request?id=lu_status2&output_format=json"
 local g_sender = nil
-local g_hostName = nil
+
+local g_agentPath = "/etc/cmh-ludl/mios_zabbix_agentd"
 
 -----------------------------------------
 --------- Utility Functions -------------
@@ -48,20 +59,6 @@ end
 ------------------------------------------
 ---------- Zabbix Communication ----------
 ------------------------------------------
-
-local function startSender()
-	local senderPath = util.getLuupVariable(SID.ZABBIX, "SenderPath", g_deviceId, util.T_STRING)
-	local agentConfigFile = util.getLuupVariable(SID.ZABBIX, "AgentConfigFile", g_deviceId, util.T_STRING)
-
-	local commandLine = senderPath .. " -c " .. agentConfigFile .. " -r -i - 1>/tmp/zabbix_sender_stdout.log 2>/tmp/zabbix_sender_stderr.log"
-	log.debug ("commandLine = ", commandLine)
-	
-	local sender = io.popen(commandLine, "w")
-	sender:flush ()
-	
-	return sender
-end
-
 --- Callback that receives notification of any changes in UPnP variables
 -- Collects the changes for periodic transmission by the sendEvents() function
 function variableWatchCallback(lul_device, lul_service, lul_variable, lul_value_old, lul_value_new)
@@ -71,9 +68,10 @@ function variableWatchCallback(lul_device, lul_service, lul_variable, lul_value_
 	", lul_value_old = ", lul_value_old,
 	", lul_value_new = ", lul_value_new)
 
+	local hostName = util.getLuupVariable(SID.ZABBIX, "VeraHostName", g_deviceId, util.T_STRING)
+
 	local outputData = {
-		g_hostName,
-		" ",
+		hostName,
 		buildKey (lul_device, lul_service, lul_variable),
 		" ",
 		lul_value_new,
@@ -83,10 +81,6 @@ function variableWatchCallback(lul_device, lul_service, lul_variable, lul_value_
 	local outputLine = table.concat(outputData)
 
 	log.debug ("Sending to Zabbix, outputLine = |", outputLine, "|")
-
-	if (g_sender == nil) then
-		g_sender = startSender()
-	end
 	
 	g_sender:write (outputLine)
 	g_sender:flush ()
@@ -177,7 +171,7 @@ function generateZabbixTemplate (lul_request, lul_parameters, lul_outputformat)
 ]]
 
 	xmlChunk = xmlChunk:gsub("__DATE__", os.date("%Y-%m-%dT%H:%M:%S", os.time()))
-	xmlChunk = xmlChunk:gsub("__HOSTNAME__", util.getLuupVariable(SID.ZABBIX, "HostName", g_deviceId, util.T_STRING))
+	xmlChunk = xmlChunk:gsub("__HOSTNAME__", util.getLuupVariable(SID.ZABBIX, "VeraHostName", g_deviceId, util.T_STRING))
 
 	table.insert(templateXml, xmlChunk)
 
@@ -250,10 +244,53 @@ end
 
 --- init Luup variables if they don't have values
 local function initLuupVariables()
-	util.initVariableIfNotSet(SID.ZABBIX, "HostName", "veralite", g_deviceId)
-	util.initVariableIfNotSet(SID.ZABBIX, "SenderPath", "/usr/bin/zabbix_sender", g_deviceId)
-	util.initVariableIfNotSet(SID.ZABBIX, "AgentConfigFile", "/etc/zabbix_agentd.conf", g_deviceId)
-	util.initVariableIfNotSet(SID.ZABBIX, "SendInterval", 30, g_deviceId)
+	util.initVariableIfNotSet(SID.ZABBIX, "ZabbixServer", "0.0.0.0", g_deviceId)
+	util.initVariableIfNotSet(SID.ZABBIX, "VeraHostName", "Vera", g_deviceId)
+end
+
+local function startZabbixSender()
+	local senderPath = util.getLuupVariable(SID.ZABBIX, "SenderPath", g_deviceId, util.T_STRING)
+	local agentConfigFile = util.getLuupVariable(SID.ZABBIX, "AgentConfigFile", g_deviceId, util.T_STRING)
+	
+	local commandLine = "chmod a+rx " .. SENDER_PATH
+	log.info ("commandLine = ", commandLine)
+	local returnCode = os.execute (commandLine)
+	log.info ("returnCode = ", returnCode)
+
+	commandLine = SENDER_PATH .. " -c " .. CONFIG_FILE .. " -r -i - 1>/tmp/mios_zabbix_sender.out 2>&1"
+	log.info ("commandLine = ", commandLine)
+	
+	g_sender = io.popen(commandLine, "w")
+	g_sender:flush ()
+
+end
+
+local function startZabbixAgent()
+	local commandLine = "killall " .. "mios_zabbix_agentd 1>/tmp/mios_zabbix_killall.out 2>&1"
+	log.info ("commandLine = ", commandLine)
+	local returnCode = os.execute (commandLine)
+	log.info ("returnCode = ", returnCode)
+	
+	-- sleep to give enough time for all mios_zabbix_agentd subprocesses to stop
+	luup.sleep(2500)
+	
+	local configFile = io.open(CONFIG_FILE, "w")
+	configFile:write ("AllowRoot=1\n")
+	configFile:write ("PidFile=/tmp/mios_zabbix_agentd.pid\n")
+	configFile:write ("LogFile=/tmp/mios_zabbix_agentd.log\n")
+	configFile:write ("Server=" .. util.getLuupVariable(SID.ZABBIX, "ZabbixServer", g_deviceId, util.T_STRING) .. "\n")
+	configFile:write ("Hostname=".. util.getLuupVariable(SID.ZABBIX, "VeraHostName", g_deviceId, util.T_STRING) .. "\n")
+	configFile:close ()
+	
+	local commandLine = "chmod a+rx " .. AGENT_PATH
+	log.info ("commandLine = ", commandLine)
+	local returnCode = os.execute (commandLine)
+	log.info ("returnCode = ", returnCode)
+	
+	local commandLine = AGENT_PATH .. " -c " .. CONFIG_FILE .. " 1>/tmp/mios_zabbix_agentd.out 2>&1 &"
+	log.info ("commandLine = ", commandLine)
+	local returnCode = os.execute (commandLine)
+	log.info ("returnCode = ", returnCode)
 end
 
 --- Initialize the  plugin
@@ -263,7 +300,7 @@ function initialize(lul_device)
 
 	g_deviceId = tonumber(lul_device)
 
-	util.initLogging(LOG_PREFIX, LOG_FILTER, SID.ZABBIX, "LogLevel", g_deviceId)
+	util.initLogging(LOG_PREFIX, DEFAULT_LOG_CONFIG, SID.ZABBIX, g_deviceId)
 
 	log.info ("Initializing Zabbix plugin for device " , g_deviceId)
 
@@ -271,8 +308,10 @@ function initialize(lul_device)
 	luup.variable_set(SID.ZABBIX, "PluginVersion", PLUGIN_VERSION, g_deviceId)
 
 	initLuupVariables()
-
-	g_hostName = util.getLuupVariable(SID.ZABBIX, "HostName", g_deviceId, util.T_STRING)
+	
+	startZabbixAgent()
+	
+	startZabbixSender()
 	
 	registerListeners(statusData)
 

@@ -4,7 +4,8 @@
 		<protocol>raw</protocol>
 	</settings>
 	<functions>
-		local lfs = require("lfs")
+	
+<!-- 		local lfs = require("lfs")
 
 		function loadModule(moduleName)
 			local srcFile = "/etc/cmh-ludl/" .. moduleName .. ".lua.lzo"
@@ -32,10 +33,12 @@
 			return require(moduleName)
 		end
 	
-		g_dkjson = loadModule("L_Zabbix_dkjson")
-		g_log = loadModule("L_Zabbix_log")
-		g_util = loadModule("L_Zabbix_util")
-		g_core = loadModule("L_Zabbix_core")
+	 -->	
+	 
+	 	g_dkjson = require("L_Zabbix_dkjson")
+		g_log = require("L_Zabbix_log")
+		g_util = require("L_Zabbix_util")
+		g_core = require("L_Zabbix_core")
 
 		function initialize(lul_device)
 			g_core.initialize(lul_device)
