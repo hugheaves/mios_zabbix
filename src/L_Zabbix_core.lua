@@ -26,7 +26,7 @@ local json = g_dkjson
 local log = g_log
 local util = g_util
 
-local PLUGIN_VERSION = "0.1"
+local PLUGIN_VERSION = "0.2"
 local LOG_PREFIX = "Zabbix"
 
 local CONFIG_FILE = "/tmp/zabbix_agentd.conf"
