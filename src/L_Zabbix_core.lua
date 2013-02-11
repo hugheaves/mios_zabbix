@@ -26,7 +26,7 @@ local json = g_dkjson
 local log = g_log
 local util = g_util
 
-local PLUGIN_VERSION = "0.3"
+local PLUGIN_VERSION = "0.5"
 local LOG_PREFIX = "Zabbix"
 
 local CONFIG_FILE = "/tmp/zabbix_agentd.conf"
@@ -117,7 +117,7 @@ end
 ------------------------------------------
 ---------- Zabbix Communication ----------
 ------------------------------------------
-local function sendValue(deviceId, service, variable, value)
+local function sendValue(deviceId, service, variable, timestamp, value)
 	local hostNamePrefix = util.getLuupVariable(SID.ZABBIX, "HostNamePrefix", g_deviceId, util.T_STRING)
 
 	-- remove double quotes (if any) from value
@@ -132,6 +132,8 @@ local function sendValue(deviceId, service, variable, value)
 		deviceId,
 		" ",
 		buildKey (service, variable),
+--		" ",
+--		timestamp,
 		" \"",
 		value,
 		"\"\n"
@@ -160,8 +162,14 @@ function variableWatchCallback(lul_device, lul_service, lul_variable, lul_value_
 	", lul_value_old = ", lul_value_old,
 	", lul_value_new = ", lul_value_new)
 
+	local timestamp = os.time()
+
+--	if (lul_value_old ~= nil) then
+--		sendValue(lul_device, lul_service, lul_variable, timestamp - 1, lul_value_old);
+--	end
+
 	if (lul_value_new ~= nil) then
-		sendValue(lul_device, lul_service, lul_variable, lul_value_new);
+		sendValue(lul_device, lul_service, lul_variable, timestamp, lul_value_new);
 	end
 
 end
@@ -458,6 +466,8 @@ local function registerListeners ()
 
 	local statusData = util.httpGetJSON(g_statusUrl)
 
+	local timestamp = os.time()
+	
 	-- for each Vera device ...
 	for i, deviceData in pairs(statusData.devices) do
 		local services = {}
@@ -467,7 +477,7 @@ local function registerListeners ()
 			if (state.value == "") then
 				state.value = "-NONE-";
 			end
-			sendValue(deviceData.id, state.service, state.variable, state.value)
+			sendValue(deviceData.id, state.service, state.variable, timestamp, state.value)
 		end
 		-- add listeners for each service in the list
 		for service, data in pairs(services) do
